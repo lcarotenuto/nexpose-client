@@ -3,27 +3,44 @@ module Nexpose
   class Connection
     include XMLUtils
 
-    # Retrieve vulnerability exceptions.
+    # Retrieve all active vulnerability exceptions.
     #
     # @param [String] status Filter exceptions by the current status.
     #   @see Nexpose::VulnException::Status
-    # @param [String] duration A time interval in the format "PnYnMnDTnHnMnS".
     # @return [Array[VulnException]] List of matching vulnerability exceptions.
     #
-    def list_vuln_exceptions(status = nil, duration = nil)
-      option = {}
-      option['status'] = status if status
-      option['time-duration'] = duration if duration
-      xml = make_xml('VulnerabilityExceptionListingRequest', option)
-      response = execute(xml, '1.2')
-
-      xs = []
-      if response.success
-        response.res.elements.each('//VulnerabilityException') do |ve|
-          xs << VulnException.parse(ve)
-        end
+    def list_vuln_exceptions(status = nil)
+      unless is_valid_vuln_exception_status?(status)
+        raise "Unknown Status ~> '#{status}' :: For available options refer to Nexpose::VulnException::Status"
       end
-      xs
+
+      status = Nexpose::VulnException::Status.const_get(status_string_to_constant(status)) unless status.nil?
+
+      results = []
+      req = Nexpose::AJAX.get(self, "/api/experimental/vulnerability_exceptions")
+      data = JSON.parse(req, object_class: OpenStruct)
+
+      data._resources.each do |vuln_excep|
+        ve = VulnException.new(vuln_excep.id, vuln_excep.scope.type, vuln_excep.submit.reason, vuln_excep.state)
+        ve.vuln_id           = vuln_excep.scope.vulnerabilityID
+        ve.submitter         = vuln_excep.submit.name
+        ve.submitter_comment = vuln_excep.submit.comment
+        ve.submit_date       = Time.parse(vuln_excep.submit.date) unless vuln_excep.submit.date.nil?
+        ve.asset_id          = vuln_excep.scope.assetID
+        ve.site_id           = vuln_excep.scope.siteID
+        ve.asset_group_id    = vuln_excep.scope.assetGroupID
+        ve.port              = vuln_excep.scope.port
+        ve.vuln_key          = vuln_excep.scope.key
+        ve.expiration        = Time.parse(vuln_excep.expires) unless vuln_excep.expires.nil?
+        unless vuln_excep.review.nil?
+          ve.reviewer          = vuln_excep.review.name
+          ve.reviewer_comment  = vuln_excep.review.comment
+          ve.review_date       = Time.parse(vuln_excep.review.date) unless vuln_excep.review.date.nil?
+        end
+        results << ve
+      end
+      results.keep_if { |v| v.status == status } unless status.nil?
+      return results
     end
 
     alias_method :vuln_exceptions, :list_vuln_exceptions
@@ -76,6 +93,23 @@ module Nexpose
                      { 'exception-id' => id })
       execute(xml, '1.2').success
     end
+
+    private
+
+      def is_valid_vuln_exception_status?(status)
+        return true if status.nil?
+        valid_status = []
+        Nexpose::VulnException::Status.constants.each {|con| valid_status << Nexpose::VulnException::Status.const_get(con) }
+        valid_status << Nexpose::VulnException::Status.constants.map(&:to_s).map(&:downcase)
+        valid_status.flatten.map(&:downcase).include?(status.downcase)
+      end
+
+      def status_string_to_constant(status)
+        Nexpose::VulnException::Status.constants.find do |name|
+          Nexpose::VulnException::Status.const_get(name).to_s.downcase==status.downcase || status.to_sym.downcase == name.downcase
+        end
+      end
+
   end
 
   # A vulnerability exception.
@@ -117,6 +151,8 @@ module Nexpose
     alias :device_id= :asset_id=
     # Id of the site, if this exception applies to all instances on a site
     attr_accessor :site_id
+    # ID of the Asset Group, if this exception applies to all instances on an asset group
+    attr_accessor :asset_group_id
     # Port on a asset, if this exception applies to a specific port.
     attr_accessor :port
     # The specific vulnerable component in a discovered instance of the
@@ -130,6 +166,11 @@ module Nexpose
     attr_accessor :submitter_comment
     # Any comment provided by the reviewer.
     attr_accessor :reviewer_comment
+    # Date when the Review occurred [Time]
+    attr_accessor :review_date
+    # Date when Submit occurred [Time]
+    attr_accessor :submit_date
+
 
     def initialize(vuln_id, scope, reason, status = nil)
       @vuln_id, @scope, @reason, @status = vuln_id, scope, reason, status
